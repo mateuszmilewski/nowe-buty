@@ -32,12 +32,12 @@ class Time
 
 
     def self.dzis
-        rdzis = Time.new(Time.now.year, Time.now.month, Time.now.day)
+        rdzis = Time.new(Time.now.year, Time.now.month, Time.now.day, 11, 0, 0)
         rdzis
     end
 
     def dzis
-        rdzis = Time.new(Time.now.year, Time.now.month, Time.now.day)
+        rdzis = Time.new(Time.now.year, Time.now.month, Time.now.day, 11, 0 , 0)
         rdzis
     end
 

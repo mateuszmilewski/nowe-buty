@@ -5,7 +5,7 @@ require './mgo-handler.rb'
 
 class ContevanController
 
-    attr_accessor :input_data, :cws, :parsed_cws, :re_parsed
+    attr_accessor :input_data, :cws, :parsed_cws, :re_parsed, :la_labels, :nb_labels
 
     def initialize
         @input_data = []
@@ -302,7 +302,9 @@ class ContevanController
                 elsif (duns.empty?) and (not pn.empty?) and (plt.empty?) then
                     q = "SELECT DISTINCT * FROM [#{access_tbnm}] WHERE (([Part No] = #{e[1]}));"
                 elsif (not duns.empty?) and (pn.empty?) and (plt.empty?) then
-                    q = "SELECT DISTINCT * FROM [#{access_tbnm}] WHERE (([Duns] = #{e[2]}));"   
+                    q = "SELECT DISTINCT * FROM [#{access_tbnm}] WHERE (([Duns] = #{e[2]}));"
+                elsif (not duns.empty?) and (pn.empty?) and (not plt.empty?) then
+                    q = "SELECT DISTINCT * FROM [#{access_tbnm}] WHERE (([Duns] = #{e[2]}) AND ([PLT] = '#{e[0]}'));"
                 else
                     q = ""
                 end
@@ -341,6 +343,9 @@ class ContevanController
              t = @cws[0].to_s
              mon = dh.get_monday_from_(t)
              mon += ( i * 7 * Time.jeden_dzien )
+
+             # puts "#{t} #{mon} #{mon.cwxx}" # OK - change Time.dzis because there was some fluctuation on hours -/+1
+             # mainly becuae time changes (winter / summer time - Ruby was changing it automatically for me iks de)
              
              raw_la_labels << "#{mon.year}_CW#{mon.cwxx}"
         end
@@ -462,6 +467,7 @@ def run_rqm m_input_data, m_cws, typeString, cum, asn
     c_ctrl.cws = m_cws
     sh = c_ctrl.run_logic typeString, c_ctrl.input_data, c_ctrl.cws, cum
 
+    
     if asn == true then
 
         # in this constructor we already have prepare_input_for_mgo_handler
@@ -474,16 +480,216 @@ def run_rqm m_input_data, m_cws, typeString, cum, asn
 
             line = 1
             while (ms.get_qty(line) != 0) && (line < 9)
-                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_eda(line) )
-    
+
+                #puts "line #{line}" # test-case OK
+
+                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_sdate(line), ms.class_name, ms.get_date(line))
                 line += 1
+
+                # this statement working only if screen is full of asns
+                if line == 9 then
+                    line = ms.press_f8
+                end
+            end
+        end
+
+        ms = MS9PH100.new mgo_handler.sess0
+        ms.open
+        mgo_handler.input_arr.each do |pair|
+            ms.set_plt_and_part_and_submit pair[0], pair[1]
+
+            line = 1
+            while (ms.get_qty(line) != 0) && (line < 10)
+
+                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_ms9ph100_date(line), ms.class_name, ms.get_date(line))
+                line += 1
+
+                if line == 10 then
+                    line = ms.press_f8
+                end
             end
         end
 
 
-        p mgo_handler.output_arr
+        active_workbook = sh.Parent
+        asn_sh = active_workbook.Sheets.Add
+
+        #puts "map for years: #{ms.map_for_years} " # OK
+        # map for years: [[7, "JL", 2019], [8, "AU", 2019], [9, "SE", 2019], [10, "OC", 2019]]
+        #p mgo_handler.output_arr
+        mgo_handler.output_arr.each_with_index do |e,i|
+            # class OutputItem : attr_accessor :plt, :pn, :qty, :nm, :yyyycw
+            # p e
+            asn_sh.Cells( 1 + i, 1 ).Value = e.yyyycw
+            asn_sh.Cells( 1 + i, 2 ).Value = e.plt
+            asn_sh.Cells( 1 + i, 3 ).Value = e.pn
+            asn_sh.Cells( 1 + i, 4 ).Value = e.nm
+            asn_sh.Cells( 1 + i, 5 ).Value = e.qty
+            asn_sh.Cells( 1 + i, 6 ).Value = e.mgo_screen_name.to_s
+            asn_sh.Cells( 1 + i, 7 ).Value = e.d
+        end
+        
+        sh.Activate
+
+        #put some comments
+        #xlDown	-4121	Down.
+        #xlToLeft	-4159	To left.
+        #xlToRight	-4161	To right.
+        #xlUp	-4162	Up.
+        xlUp = -4162
+        
+        label_row = 4
+        plt_column = c_ctrl.nb_labels.index("PLT") + 2
+        pn_column = c_ctrl.nb_labels.index("PN") + 2
+
+        arrarr = Array.new(1000) { Array.new(1000) }
+        
+        
+
+        mgo_handler.output_arr.each_with_index do |e,i|
+
+
+            first_2_letters_from_sid = e.nm[0,2]
+
+            if first_2_letters_from_sid != "IP" then
+
+                # puts "#{sh.Cells(wiersz, plt_column).Value} #{e.plt} #{sh.Cells(wiersz, pn_column).Value.to_i} #{e.pn.to_i}"
+                wiersz = sh.Cells(10000,2).End(xlUp).Row
+
+                while wiersz > label_row
+                    
+
+                    if sh.Cells(wiersz, plt_column).Value.to_s.strip == e.plt.to_s.strip \
+                        && sh.Cells(wiersz, pn_column).Value.to_i == e.pn.to_i then
+
+                        parsed_yyyycw_from_data_to_match_with_label = "#{e.yyyycw[0,4]}_CW#{e.yyyycw[4,2]}"
+
+                        r = sh.Cells(label_row, 2)
+                        #p r.Value
+
+                        while r.Value.to_s.strip != ""
+
+                            # puts "in while #{r.Value} == #{parsed_yyyycw_from_data_to_match_with_label}"
+
+
+                            if parsed_yyyycw_from_data_to_match_with_label == r.Value.to_s.strip then
+
+                                kolumna_komentarza = r.Column
+
+                                #p r
+                                #p r.Address # to jest label tylko
+
+                                
+
+                                vr = sh.Cells(wiersz, r.Column)
+                                #p vr
+                                #p vr.Value
+                                #p vr.Value.to_s.strip
+
+                                if vr.nil? then
+                                    # NOP
+                                elsif vr.Value.nil? then
+                                    # NOP
+                                elsif vr.Value == " " then
+                                    # NOP
+                                elsif vr.Value.to_s.strip == "" then
+                                    # NOP
+                                else
+                                    # p vr
+                                    #p r.Comment
+                                    if vr.Comment.nil? then
+
+                                        
+
+                                        vr.AddComment "PLT  PN               DATE      SID                 QTY      YYYYCW   SCR \n"
+
+                                        if e.mgo_screen_name == "MS9PH100"
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}     #{e.nm}    #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        else
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}  #{e.nm}   #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        end
+
+                                        arrarr[wiersz][r.Column] = e.qty.to_i
+                                        vr.Comment.Shape.TextFrame.AutoSize = true
+                                        
+                                    else
+
+                                        
+
+                                        if e.mgo_screen_name == "MS9PH100"
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}     #{e.nm}    #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        else
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}  #{e.nm}   #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        end
+                                        
+                                        
+                                        arrarr[wiersz][r.Column] += e.qty.to_i
+                                        vr.Comment.Shape.TextFrame.AutoSize = true
+                                    end
+                                    #p e
+                                    #puts "--------"
+                                    
+                                    # puts "tablica tablica #{wiersz} #{r.Column} : #{arrarr[wiersz][r.Column]}  vr #{vr.Value}"
+
+
+                                    if arrarr[wiersz][r.Column].nil? then
+                                        # nop
+                                    else
+                                        if arrarr[wiersz][r.Column] > vr.Value.to_i then
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0xffa0a0;
+
+                                        elsif arrarr[wiersz][r.Column] < vr.Value.to_i
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0xa0a0ff;
+                                        
+                                        else
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0x07ff07;
+
+                                        end
+                                    end
+
+                                    wiersz = label_row
+                                end
+                            end
+
+                            r = r.Offset(0,1)
+                        end
+                    end
+
+                    wiersz -= 1
+                end
+
+            end
+        end
+
+
+
+
+        # tutaj jeszcze sum na commentsach
+        cmnt_arr = sh.Comments
+        cmnt_arr.each do | c |
+            
+            icol = c.Parent.Column
+            irow = c.Parent.Row
+
+            c.Parent.Comment.Text "\n ----------- \n SUM: #{ arrarr[irow][icol] }", \
+                c.Parent.Comment.Text.to_s.size + 1, false
+
+        end
+
+
     end
 end
+
 
 def run_sched m_input_data, m_cws, typeString, cum, asn
     c_ctrl = ContevanController.new
@@ -491,6 +697,8 @@ def run_sched m_input_data, m_cws, typeString, cum, asn
     c_ctrl.cws = m_cws
     #c_ctrl.run_logic "RQM", c_ctrl.input_data, c_ctrl.cws, false, false
     sh = c_ctrl.run_logic typeString, c_ctrl.input_data, c_ctrl.cws, cum
+
+    
 
     if asn == true then
 
@@ -507,8 +715,7 @@ def run_sched m_input_data, m_cws, typeString, cum, asn
 
                 #puts "line #{line}" # test-case OK
 
-                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_eda(line) )
-    
+                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_sdate(line), ms.class_name, ms.get_date(line) )
                 line += 1
 
                 # this statement working only if screen is full of asns
@@ -518,14 +725,208 @@ def run_sched m_input_data, m_cws, typeString, cum, asn
             end
         end
 
+        ms = MS9PH100.new mgo_handler.sess0
+        ms.open
+        mgo_handler.input_arr.each do |pair|
+            ms.set_plt_and_part_and_submit pair[0], pair[1]
+            ms.move_right_for_shp_dt
 
-        p mgo_handler.output_arr
+            line = 1
+            while (ms.get_qty(line) != 0) && (line < 10)
+
+                mgo_handler.output_arr << OutputItem.new( pair[0], pair[1], ms.get_qty(line), ms.get_sid(line), ms.get_yyyycw_from_ms9ph100_sdate(line), ms.class_name, ms.get_sdate(line) )
+                line += 1
+
+                if line == 10 then
+                    line = ms.press_f8
+                end
+            end
+        end
+
+
+        active_workbook = sh.Parent
+        asn_sh = active_workbook.Sheets.Add
+
+        #puts "map for years: #{ms.map_for_years} " # OK
+        # map for years: [[7, "JL", 2019], [8, "AU", 2019], [9, "SE", 2019], [10, "OC", 2019]]
+        #p mgo_handler.output_arr
+        mgo_handler.output_arr.each_with_index do |e,i|
+            # class OutputItem : attr_accessor :plt, :pn, :qty, :nm, :yyyycw
+            # p e
+            asn_sh.Cells( 1 + i, 1 ).Value = e.yyyycw
+            asn_sh.Cells( 1 + i, 2 ).Value = e.plt
+            asn_sh.Cells( 1 + i, 3 ).Value = e.pn
+            asn_sh.Cells( 1 + i, 4 ).Value = e.nm
+            asn_sh.Cells( 1 + i, 5 ).Value = e.qty
+            asn_sh.Cells( 1 + i, 6 ).Value = e.mgo_screen_name.to_s
+            asn_sh.Cells( 1 + i, 7 ).Value = e.d
+        end
+        
+        sh.Activate
+
+        #put some comments
+        #xlDown	-4121	Down.
+        #xlToLeft	-4159	To left.
+        #xlToRight	-4161	To right.
+        #xlUp	-4162	Up.
+        xlUp = -4162
+        
+        label_row = 4
+        plt_column = c_ctrl.la_labels.index("PLT") + 2
+        pn_column = c_ctrl.la_labels.index("PN") + 2
+
+        arrarr = Array.new(1000) { Array.new(1000) }
+        
+        
+
+        mgo_handler.output_arr.each_with_index do |e,i|
+
+
+            first_2_letters_from_sid = e.nm[0,2]
+
+            if first_2_letters_from_sid != "IP" then
+
+                # puts "#{sh.Cells(wiersz, plt_column).Value} #{e.plt} #{sh.Cells(wiersz, pn_column).Value.to_i} #{e.pn.to_i}"
+                wiersz = sh.Cells(10000,2).End(xlUp).Row
+
+                while wiersz > label_row
+                    
+
+                    if sh.Cells(wiersz, plt_column).Value.to_s.strip == e.plt.to_s.strip \
+                        && sh.Cells(wiersz, pn_column).Value.to_i == e.pn.to_i then
+
+                        parsed_yyyycw_from_data_to_match_with_label = "#{e.yyyycw[0,4]}_CW#{e.yyyycw[4,2]}"
+
+                        r = sh.Cells(label_row, 2)
+                        #p r.Value
+
+                        while r.Value.to_s.strip != ""
+
+                            # puts "in while #{r.Value} == #{parsed_yyyycw_from_data_to_match_with_label}"
+
+
+                            if parsed_yyyycw_from_data_to_match_with_label == r.Value.to_s.strip then
+
+                                kolumna_komentarza = r.Column
+
+                                #p r
+                                #p r.Address # to jest label tylko
+
+                                
+
+                                vr = sh.Cells(wiersz, r.Column)
+                                #p vr
+                                #p vr.Value
+                                #p vr.Value.to_s.strip
+
+                                if vr.nil? then
+                                    # NOP
+                                elsif vr.Value.nil? then
+                                    # NOP
+                                elsif vr.Value == " " then
+                                    # NOP
+                                elsif vr.Value.to_s.strip == "" then
+                                    # NOP
+                                else
+                                    # p vr
+                                    #p r.Comment
+                                    if vr.Comment.nil? then
+
+                                        
+
+                                        vr.AddComment "PLT  PN               DATE      SID                 QTY      YYYYCW   SCR \n"
+
+                                        if e.mgo_screen_name == "MS9PH100"
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}     #{e.nm}    #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        else
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}  #{e.nm}   #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        end
+
+                                        arrarr[wiersz][r.Column] = e.qty.to_i
+                                        vr.Comment.Shape.TextFrame.AutoSize = true
+                                        
+                                    else
+
+                                        
+
+                                        if e.mgo_screen_name == "MS9PH100"
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}     #{e.nm}    #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        else
+                                            vr.Comment.Text "#{e.plt}   #{e.pn.to_i} #{e.d}  #{e.nm}   #{e.qty}       #{e.yyyycw}    #{e.mgo_screen_name}\n", \
+                                                vr.Comment.Text.to_s.size + 1, false
+                                        end
+                                        
+                                        
+                                        arrarr[wiersz][r.Column] += e.qty.to_i
+                                        vr.Comment.Shape.TextFrame.AutoSize = true
+                                    end
+                                    #p e
+                                    #puts "--------"
+                                    
+                                    # puts "tablica tablica #{wiersz} #{r.Column} : #{arrarr[wiersz][r.Column]}  vr #{vr.Value}"
+
+
+                                    if arrarr[wiersz][r.Column].nil? then
+                                        # nop
+                                    else
+                                        if arrarr[wiersz][r.Column] > vr.Value.to_i then
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0xffa0a0;
+
+                                        elsif arrarr[wiersz][r.Column] < vr.Value.to_i
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0xa0a0ff;
+                                        
+                                        else
+                                            vr.Font.Color = 0xffffff;
+                                            vr.Font.Bold = true;
+                                            vr.Interior.Color = 0x07ff07;
+
+                                        end
+                                    end
+
+                                    wiersz = label_row
+                                end
+                            end
+
+                            r = r.Offset(0,1)
+                        end
+                    end
+
+                    wiersz -= 1
+                end
+
+            end
+        end
+
+
+
+
+        # tutaj jeszcze sum na commentsach
+        cmnt_arr = sh.Comments
+        cmnt_arr.each do | c |
+            
+            icol = c.Parent.Column
+            irow = c.Parent.Row
+
+            c.Parent.Comment.Text "\n ----------- \n SUM: #{ arrarr[irow][icol] }", \
+                c.Parent.Comment.Text.to_s.size + 1, false
+
+        end
+
+
     end
 end
 
 
 def test_on_run_sched
-    run_sched [["","13520813",""]], ["201940", "201940"], "SCHED", false, true
+    run_sched [["PO","39203559",""]], ["201941", "201941"], "SCHED", false, true
 end
+
 
 # test_on_run_sched
